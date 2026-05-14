@@ -98,19 +98,46 @@
 // ============================================================
 // ⚙️ CONFIG — แก้ตรงนี้ก่อนใช้งาน
 // ============================================================
-const GEMINI_API_KEY = 'AIzaSyAXf8_PSBv0tGOfkLiJJ6jIGgcxIaCCIAo';
-const SCAN_INTERVAL_MS = 2000;  // สแกนทุก 2 วินาที
-const MODELS_TO_TRY = [
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash'
+// 🔥 หลาย API Keys (เรียงตามลำดับ — ตัวบนสุดถูกใช้ก่อน)
+const GEMINI_API_KEYS = [
+  'AIzaSyAXf8_PSBv0tGOfkLiJJ6jIGgcxIaCCIAo', // Key #1
+  'AIzaSyBCGyq4nVV7DOO3MN_Apx0FIh_l8poxB88', // Key #2
+  'AIzaSyBNGLKqkBOqrmcQL71Y9f1NV6bqO21gU3Q', // Key #3
+  'AIzaSyAhlyFkjSHG8MrI2geQQ5fI6VRwySwNx64', // Key #4
+  'AIzaSyAWADpCdWaRUp8n5QAn6U04cg4wzEoJi9A'  // Key #5
 ];
+
+const SCAN_INTERVAL_MS = 5000;       // สแกนทุก 5 วินาที (รองรับ multi-user)
+const BACKOFF_AFTER_429_MS = 10000;  // ถ้าทุกตัวโดน 429 รอ 10 วิ
+
+// 🔥 รายชื่อโมเดล: เรียงจากโควต้าเยอะสุดไปน้อยสุด
+const MODELS_TO_TRY = [
+  'gemini-3.1-flash-lite-preview', // พระเอก โควต้า 500/วัน 15/นาที
+  'gemini-3-flash-preview',        // สำรอง (ซีรีส์ 3)
+  'gemini-2.5-flash-lite',         // 20/วัน 10/นาที
+  'gemini-3-flash',                // 20/วัน 5/นาที
+  'gemini-2-flash',                // สำรองฉุกเฉิน
+  'gemini-2.5-flash'               // คิวท้าย (เจอ limit บ่อย)
+];
+
+// 🔔 GAS Web App URL สำหรับส่ง email alert (ใส่ /exec URL ของ GAS Web App ของพี่)
+const GAS_ALERT_URL = 'https://script.google.com/macros/s/REPLACE_WITH_YOUR_DEPLOYMENT_ID/exec';
+const ALERT_THROTTLE_MS = 60 * 60 * 1000; // ส่งเมลซ้ำได้แค่ 1 ครั้งต่อชั่วโมง
 
 // ============================================================
 let stream = null;
 let scanInterval = null;
 let scanInProgress = false;
 let attemptCount = 0;
+let pauseUntilTs = 0;          // 🔥 ใช้กับ 429 backoff
+let lastUsedLabel = '';        // Label ของ key/model ที่ใช้ล่าสุด
+let lastWorkingKeyIdx = 0;     // เริ่มจาก key ตัวไหน (ตัวที่เคยใช้ได้)
+let lastWorkingModelIdx = 0;   // เริ่มจาก model ตัวไหน (ตัวที่เคยใช้ได้)
+
+// 🔥 Smart Caching เพื่อกระจายโหลด + เลี่ยงโมเดลที่ไม่มี
+const dead404 = new Set();         // "keyIdx|model" ที่ 404 → ถาวรใน session
+const cooldownUntil = {};          // "keyIdx|model" → timestamp ที่กลับมาใช้ได้
+const COOLDOWN_429_MS = 60 * 1000; // โดน 429 → พัก 60 วินาที ก่อนลองคู่นี้ใหม่
 
 const videoEl = document.getElementById('video');
 const statusEl = document.getElementById('status');
@@ -148,6 +175,13 @@ async function scanFrame() {
   if (scanInProgress) return;
   if (!videoEl.videoWidth || videoEl.readyState < 2) return;
 
+  // 🔥 Smart Backoff: ถ้ายังอยู่ในช่วงพักจาก rate limit ให้ข้ามรอบนี้
+  if (Date.now() < pauseUntilTs) {
+    const remain = Math.ceil((pauseUntilTs - Date.now()) / 1000);
+    setStatus('⏸️ พักจาก rate limit อีก ' + remain + ' วินาที...');
+    return;
+  }
+
   scanInProgress = true;
   attemptCount++;
 
@@ -160,7 +194,7 @@ async function scanFrame() {
   const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
   const base64 = dataUrl.split(',')[1];
 
-  setStatus('<span class="scanning-dot"></span>🤖 AI กำลังอ่าน... (ครั้งที่ ' + attemptCount + ')');
+  setStatus('<span class="scanning-dot"></span>🤖 AI กำลังอ่าน... (' + (lastUsedLabel || 'K1') + ' · #' + attemptCount + ')');
 
   try {
     const plate = await callGemini(base64);
@@ -170,7 +204,13 @@ async function scanFrame() {
       setStatus('<span class="scanning-dot"></span>🔍 ยังไม่ชัด... ลองขยับใกล้ขึ้น');
     }
   } catch (err) {
-    setStatus('⚠️ ' + err.message + '<br><small>กำลังลองใหม่...</small>');
+    if (err.is429) {
+      // ทุกโมเดลโดน rate limit → พักนานขึ้นก่อน retry
+      pauseUntilTs = Date.now() + BACKOFF_AFTER_429_MS;
+      setStatus('⚠️ AI โควต้าเต็มชั่วคราว — พัก ' + (BACKOFF_AFTER_429_MS/1000) + ' วินาที...');
+    } else {
+      setStatus('⚠️ ' + err.message + '<br><small>กำลังลองใหม่...</small>');
+    }
   } finally {
     scanInProgress = false;
   }
@@ -188,32 +228,149 @@ async function callGemini(base64Data) {
   };
 
   let lastErr = null;
-  for (const model of MODELS_TO_TRY) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (resp.status === 429 || resp.status === 404 || resp.status === 503) {
-        lastErr = new Error('โมเดล ' + model + ' โควต้าเต็ม/ไม่มี (' + resp.status + ')');
+  let triedAny = false;       // มีการยิง API จริงไหม (ไม่นับที่ skip)
+  let only429 = true;          // ทุกการยิงจริงโดน 429 หรือเปล่า
+  let stats = { skipped: 0, tried: 0, _404: 0, _429: 0, _other: 0 };
+
+  // 🔥 วน Key เริ่มจาก key ที่เคยใช้ได้
+  for (let ki = 0; ki < GEMINI_API_KEYS.length; ki++) {
+    const keyIdx = (lastWorkingKeyIdx + ki) % GEMINI_API_KEYS.length;
+    const apiKey = GEMINI_API_KEYS[keyIdx];
+    if (!apiKey || !apiKey.trim()) continue;
+
+    // 🔥 วน Model ภายใน key นี้
+    for (let mi = 0; mi < MODELS_TO_TRY.length; mi++) {
+      const modelIdx = (lastWorkingModelIdx + mi) % MODELS_TO_TRY.length;
+      const model = MODELS_TO_TRY[modelIdx];
+      const cacheKey = keyIdx + '|' + model;
+
+      // 🔥 Skip ถ้าเคย 404 แล้ว (ไม่มีโมเดลนี้ในบัญชีนี้)
+      if (dead404.has(cacheKey)) { stats.skipped++; continue; }
+
+      // 🔥 Skip ถ้ายัง cooldown จาก 429 อยู่
+      if (cooldownUntil[cacheKey] && Date.now() < cooldownUntil[cacheKey]) {
+        stats.skipped++;
         continue;
       }
-      if (!resp.ok) {
-        const errText = await resp.text();
-        throw new Error('API Error ' + resp.status + ': ' + errText.slice(0, 100));
+
+      try {
+        triedAny = true;
+        stats.tried++;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (resp.status === 429) {
+          stats._429++;
+          // 🔥 พักคู่นี้ไว้ 60 วินาที ก่อนลองใหม่
+          cooldownUntil[cacheKey] = Date.now() + COOLDOWN_429_MS;
+          lastErr = new Error('K' + (keyIdx+1) + '·' + model + ' โดน 429');
+          continue;
+        }
+        if (resp.status === 401 || resp.status === 403) {
+          // Key ใช้ไม่ได้ (auth/restriction) → จำว่าตายไว้ทุก model สำหรับ key นี้
+          only429 = false;
+          stats._other++;
+          MODELS_TO_TRY.forEach(m => dead404.add(keyIdx + '|' + m));
+          lastErr = new Error('K' + (keyIdx+1) + ' invalid (' + resp.status + ')');
+          break; // ออกจาก loop model ไป key ถัดไป
+        }
+        if (resp.status === 404) {
+          // 🔥 โมเดลไม่มีใน account นี้ → จำไว้ ไม่ลองอีก
+          only429 = false;
+          stats._404++;
+          dead404.add(cacheKey);
+          lastErr = new Error('K' + (keyIdx+1) + '·' + model + ' ไม่มี (404)');
+          continue;
+        }
+        if (resp.status === 503) {
+          only429 = false;
+          stats._other++;
+          // ชั่วคราว: cool 30 วิ
+          cooldownUntil[cacheKey] = Date.now() + 30000;
+          lastErr = new Error(model + ' busy (503)');
+          continue;
+        }
+        if (!resp.ok) {
+          only429 = false;
+          stats._other++;
+          const errText = await resp.text();
+          lastErr = new Error('Error ' + resp.status + ': ' + errText.slice(0, 80));
+          continue;
+        }
+
+        // 🎯 สำเร็จ
+        lastWorkingKeyIdx = keyIdx;
+        lastWorkingModelIdx = modelIdx;
+        lastUsedLabel = 'K' + (keyIdx+1) + '·' + model.replace('gemini-', '').replace('-preview', '');
+
+        const json = await resp.json();
+        if (!json.candidates || !json.candidates.length) {
+          only429 = false;
+          stats._other++;
+          continue;
+        }
+        const parsed = JSON.parse(json.candidates[0].content.parts[0].text);
+        return String(parsed.plate || '').trim();
+      } catch (err) {
+        only429 = false;
+        lastErr = err;
       }
-      const json = await resp.json();
-      if (!json.candidates || !json.candidates.length) continue;
-      const parsed = JSON.parse(json.candidates[0].content.parts[0].text);
-      return String(parsed.plate || '').trim();
-    } catch (err) {
-      lastErr = err;
-    }
+    } // จบลูป model
+  } // จบลูป key
+
+  // มาถึงตรงนี้ = ทุก key ทุก model ใช้ไม่ได้ทั้งหมดในรอบนี้
+  console.log('[plate-scanner] All exhausted', stats);
+
+  // ถ้าทุกการยิงจริงเป็น 429 หมด (หรือ skip ทั้งหมดเพราะ cooldown) → backoff + เมล
+  if (only429 || !triedAny) {
+    sendRateLimitAlert(); // 📧 ส่งเมล (throttled 1 ชม.)
+    const e = new Error('ทุก Keys + ทุก Models เต็ม (' + stats._429 + ' รอ cooldown · ' + stats.skipped + ' skip)');
+    e.is429 = true;
+    throw e;
   }
+
   if (lastErr) throw lastErr;
   return '';
+}
+
+// ============================================================
+// 📧 ส่ง Email Alert ผ่าน GAS (no-cors fire-and-forget)
+// ============================================================
+async function sendRateLimitAlert() {
+  if (!GAS_ALERT_URL || GAS_ALERT_URL.includes('REPLACE_WITH')) {
+    console.warn('GAS_ALERT_URL ยังไม่ได้ตั้งค่า');
+    return;
+  }
+
+  // Throttle: ส่งเมลซ้ำได้แค่ 1 ครั้งต่อชั่วโมง
+  const lastTs = parseInt(localStorage.getItem('lastRateAlertTs') || '0');
+  if (Date.now() - lastTs < ALERT_THROTTLE_MS) {
+    console.log('Alert throttled (sent recently)');
+    return;
+  }
+  localStorage.setItem('lastRateAlertTs', Date.now().toString());
+
+  try {
+    await fetch(GAS_ALERT_URL, {
+      method: 'POST',
+      mode: 'no-cors',  // fire-and-forget (ไม่ต้องอ่าน response)
+      headers: { 'Content-Type': 'text/plain' },  // หลีก preflight
+      body: JSON.stringify({
+        action: 'rate_limit_alert',
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent.slice(0, 200),
+        keysCount: GEMINI_API_KEYS.length,
+        modelsCount: MODELS_TO_TRY.length
+      })
+    });
+    console.log('📧 Alert sent to GAS');
+  } catch (err) {
+    console.warn('Send alert failed:', err);
+  }
 }
 
 // ============================================================
