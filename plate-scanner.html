@@ -400,9 +400,52 @@ function onPlateFound(plate) {
   if (scanInterval) { clearInterval(scanInterval); scanInterval = null; }
   setStatus('✅ อ่านได้: ' + plate, 'success');
 
-  // ส่งกลับไปหน้า GAS ผ่าน postMessage
-  if (window.opener && !window.opener.closed) {
-    window.opener.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
+  // 🔍 Debug logs
+  console.log('[plate-scanner] ✅ Plate found:', plate);
+  console.log('[plate-scanner] window.opener:', window.opener);
+  console.log('[plate-scanner] window.opener.closed:', window.opener && window.opener.closed);
+
+  // 🔥 ส่งกลับไปหน้า GAS ผ่าน postMessage (ลองหลายทาง)
+  let sentSuccess = false;
+
+  // ลอง 1: ส่งให้ opener ตรงๆ
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
+      console.log('[plate-scanner] ✅ Sent via window.opener');
+      sentSuccess = true;
+    }
+  } catch (e) {
+    console.warn('[plate-scanner] ❌ opener.postMessage failed:', e);
+  }
+
+  // ลอง 2: ส่งให้ opener.parent (ถ้า opener อยู่ใน iframe)
+  try {
+    if (window.opener && window.opener.parent && window.opener.parent !== window.opener) {
+      window.opener.parent.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
+      console.log('[plate-scanner] ✅ Sent via window.opener.parent');
+      sentSuccess = true;
+    }
+  } catch (e) {
+    console.warn('[plate-scanner] ❌ opener.parent.postMessage failed:', e);
+  }
+
+  // ลอง 3: ส่งให้ opener.top (ถ้า opener อยู่ใน iframe ลึก)
+  try {
+    if (window.opener && window.opener.top && window.opener.top !== window.opener) {
+      window.opener.top.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
+      console.log('[plate-scanner] ✅ Sent via window.opener.top');
+      sentSuccess = true;
+    }
+  } catch (e) {
+    console.warn('[plate-scanner] ❌ opener.top.postMessage failed:', e);
+  }
+
+  if (!sentSuccess) {
+    console.error('[plate-scanner] ❌ ทุกช่องทางส่ง message ล้มเหลว!');
+    setStatus('⚠️ อ่านได้ "' + plate + '" แต่ส่งกลับ GAS ไม่ได้<br><small>กรุณา copy ทะเบียนแล้วใส่เอง</small>', 'error');
+    // ไม่ปิดหน้าต่างทันที เพื่อให้ user copy ได้
+    return;
   }
 
   // หยุดกล้อง + ปิดหน้าต่าง
