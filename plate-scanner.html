@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>📷 สแกนทะเบียนรถ</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', 'Noto Sans Thai', sans-serif;
+    background: #000;
+    color: white;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    overflow: hidden;
+  }
+  h1 { font-size: 17px; font-weight: 600; margin-bottom: 12px; color: #fff; }
+  .video-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 480px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 3px solid white;
+    background: #111;
+  }
+  video {
+    width: 100%;
+    display: block;
+  }
+  /* กรอบแนะนำตำแหน่งทะเบียน */
+  .scan-frame {
+    position: absolute;
+    top: 35%; left: 10%; right: 10%; bottom: 35%;
+    border: 2px dashed #FFC107;
+    border-radius: 6px;
+    pointer-events: none;
+  }
+  .scan-frame::before {
+    content: 'จัดทะเบียนให้อยู่ในกรอบ';
+    position: absolute;
+    top: -24px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #FFC107; white-space: nowrap;
+    background: rgba(0,0,0,0.6); padding: 2px 8px; border-radius: 4px;
+  }
+  .status {
+    margin-top: 16px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 500;
+    color: #FFE0B2;
+    min-height: 40px;
+    padding: 0 12px;
+  }
+  .status.success { color: #A5D6A7; font-size: 16px; font-weight: 700; }
+  .status.error { color: #EF9A9A; }
+  .btn-cancel {
+    margin-top: 18px;
+    padding: 12px 36px;
+    background: #C0392B;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-cancel:active { transform: scale(0.96); }
+  .scanning-dot {
+    display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #4CAF50;
+    margin-right: 6px;
+    animation: pulse 1s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+</style>
+</head>
+<body>
+
+<h1>📷 สแกนทะเบียนรถ</h1>
+
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div class="scan-frame"></div>
+</div>
+
+<div id="status" class="status">กำลังเปิดกล้อง...</div>
+
+<button type="button" class="btn-cancel" onclick="cancelScan()">ยกเลิก</button>
+
+<script>
+// ============================================================
+// ⚙️ CONFIG — แก้ตรงนี้ก่อนใช้งาน
+// ============================================================
+const GEMINI_API_KEY = 'AIzaSyAXf8_PSBv0tGOfkLiJJ6jIGgcxIaCCIAo';
+const SCAN_INTERVAL_MS = 2000;  // สแกนทุก 2 วินาที
+const MODELS_TO_TRY = [
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash'
+];
+
+// ============================================================
+let stream = null;
+let scanInterval = null;
+let scanInProgress = false;
+let attemptCount = 0;
+
+const videoEl = document.getElementById('video');
+const statusEl = document.getElementById('status');
+
+function setStatus(text, type) {
+  statusEl.className = 'status' + (type ? ' ' + type : '');
+  statusEl.innerHTML = text;
+}
+
+// ============================================================
+// เปิดกล้อง
+// ============================================================
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('❌ เบราว์เซอร์นี้ไม่รองรับการเปิดกล้อง', 'error');
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    videoEl.srcObject = stream;
+    setStatus('<span class="scanning-dot"></span>🔍 กำลังสแกน...');
+    scanInterval = setInterval(scanFrame, SCAN_INTERVAL_MS);
+  } catch (err) {
+    setStatus('❌ เปิดกล้องไม่ได้: ' + err.message + '<br><small>กรุณาอนุญาตการเข้าถึงกล้อง แล้ว refresh</small>', 'error');
+  }
+}
+
+// ============================================================
+// จับภาพแล้วส่งให้ Gemini
+// ============================================================
+async function scanFrame() {
+  if (scanInProgress) return;
+  if (!videoEl.videoWidth || videoEl.readyState < 2) return;
+
+  scanInProgress = true;
+  attemptCount++;
+
+  // จับภาพจาก video → canvas
+  const canvas = document.createElement('canvas');
+  let w = videoEl.videoWidth, h = videoEl.videoHeight;
+  if (w > 1024) { h = Math.round(h * 1024 / w); w = 1024; }
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(videoEl, 0, 0, w, h);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+  const base64 = dataUrl.split(',')[1];
+
+  setStatus('<span class="scanning-dot"></span>🤖 AI กำลังอ่าน... (ครั้งที่ ' + attemptCount + ')');
+
+  try {
+    const plate = await callGemini(base64);
+    if (plate && isValidThaiPlate(plate)) {
+      onPlateFound(plate);
+    } else {
+      setStatus('<span class="scanning-dot"></span>🔍 ยังไม่ชัด... ลองขยับใกล้ขึ้น');
+    }
+  } catch (err) {
+    setStatus('⚠️ ' + err.message + '<br><small>กำลังลองใหม่...</small>');
+  } finally {
+    scanInProgress = false;
+  }
+}
+
+// ============================================================
+// เรียก Gemini API พร้อม fallback หลายโมเดล
+// ============================================================
+async function callGemini(base64Data) {
+  const prompt = 'วิเคราะห์ภาพนี้ ดึงเฉพาะ "ป้ายทะเบียนรถ" ของไทยออกมา ตอบกลับเป็น JSON เท่านั้น: {"plate": "เช่น 1กข 2345"}\n- ถ้าไม่เห็นทะเบียนรถ หรือเห็นไม่ชัด ให้ใส่ {"plate": ""}\n- รูปแบบทะเบียนไทย: ตัวเลข+ตัวอักษรไทย+ตัวเลข เช่น "1กข 2345" หรือ "ทพ 1234"\n- เอาเฉพาะตัวอักษรและตัวเลข ไม่ต้องใส่ชื่อจังหวัด';
+
+  const payload = {
+    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: base64Data }}]}],
+    generationConfig: { responseMimeType: 'application/json' }
+  };
+
+  let lastErr = null;
+  for (const model of MODELS_TO_TRY) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (resp.status === 429 || resp.status === 404 || resp.status === 503) {
+        lastErr = new Error('โมเดล ' + model + ' โควต้าเต็ม/ไม่มี (' + resp.status + ')');
+        continue;
+      }
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error('API Error ' + resp.status + ': ' + errText.slice(0, 100));
+      }
+      const json = await resp.json();
+      if (!json.candidates || !json.candidates.length) continue;
+      const parsed = JSON.parse(json.candidates[0].content.parts[0].text);
+      return String(parsed.plate || '').trim();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return '';
+}
+
+// ============================================================
+// เช็คว่าเป็นทะเบียนไทยที่ valid ไหม
+// (ต้องมีอักษรไทย + เลข + ความยาวอย่างน้อย 4)
+// ============================================================
+function isValidThaiPlate(text) {
+  if (!text || text.length < 4) return false;
+  const hasThai = /[฀-๿]/.test(text);
+  const hasDigit = /\d/.test(text);
+  return hasThai && hasDigit;
+}
+
+// ============================================================
+// เจอทะเบียนแล้ว → ส่งกลับ GAS + ปิดหน้าต่าง
+// ============================================================
+function onPlateFound(plate) {
+  if (scanInterval) { clearInterval(scanInterval); scanInterval = null; }
+  setStatus('✅ อ่านได้: ' + plate, 'success');
+
+  // ส่งกลับไปหน้า GAS ผ่าน postMessage
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
+  }
+
+  // หยุดกล้อง + ปิดหน้าต่าง
+  setTimeout(() => {
+    stopCamera();
+    window.close();
+  }, 900);
+}
+
+function cancelScan() {
+  if (window.opener && !window.opener.closed) {
+    window.opener.postMessage({ type: 'PLATE_CANCELLED' }, '*');
+  }
+  stopCamera();
+  window.close();
+}
+
+function stopCamera() {
+  if (scanInterval) { clearInterval(scanInterval); scanInterval = null; }
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+}
+
+window.addEventListener('beforeunload', stopCamera);
+window.addEventListener('load', startCamera);
+</script>
+
+</body>
+</html>
