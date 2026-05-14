@@ -121,7 +121,7 @@ const MODELS_TO_TRY = [
 ];
 
 // 🔔 GAS Web App URL สำหรับส่ง email alert (ใส่ /exec URL ของ GAS Web App ของพี่)
-const GAS_ALERT_URL = 'https://script.google.com/macros/s/REPLACE_WITH_YOUR_DEPLOYMENT_ID/exec';
+const GAS_ALERT_URL = 'https://script.google.com/macros/s/AKfycbxH6GRcJ8axUpR3tR3LNQz9BA2KUZaZva-htfuFhwnQ92u28UY1TLy6lMCqbNHXjzlY/exec';
 const ALERT_THROTTLE_MS = 60 * 60 * 1000; // ส่งเมลซ้ำได้แค่ 1 ครั้งต่อชั่วโมง
 
 // ============================================================
@@ -396,63 +396,56 @@ function isValidThaiPlate(text) {
 // ============================================================
 // เจอทะเบียนแล้ว → ส่งกลับ GAS + ปิดหน้าต่าง
 // ============================================================
-function onPlateFound(plate) {
+async function onPlateFound(plate) {
   if (scanInterval) { clearInterval(scanInterval); scanInterval = null; }
-  setStatus('✅ อ่านได้: ' + plate, 'success');
+  setStatus('✅ อ่านได้: ' + plate + '<br><small>กำลังส่งกลับ GAS...</small>', 'success');
 
-  // 🔍 Debug logs
   console.log('[plate-scanner] ✅ Plate found:', plate);
-  console.log('[plate-scanner] window.opener:', window.opener);
-  console.log('[plate-scanner] window.opener.closed:', window.opener && window.opener.closed);
 
-  // 🔥 ส่งกลับไปหน้า GAS ผ่าน postMessage (ลองหลายทาง)
-  let sentSuccess = false;
+  // 🔥 ส่งให้ GAS เก็บไว้รอ frontend poll (ใช้ sessionId จาก URL)
+  const sessionId = new URLSearchParams(window.location.search).get('session');
+  let sentToGas = false;
 
-  // ลอง 1: ส่งให้ opener ตรงๆ
+  if (sessionId && GAS_ALERT_URL && !GAS_ALERT_URL.includes('REPLACE_WITH')) {
+    try {
+      await fetch(GAS_ALERT_URL, {
+        method: 'POST',
+        mode: 'no-cors', // fire-and-forget
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({
+          action: 'plate_callback',
+          sessionId: sessionId,
+          plate: plate
+        })
+      });
+      sentToGas = true;
+      console.log('[plate-scanner] ✅ ส่งให้ GAS แล้ว (sessionId:', sessionId, ')');
+    } catch (e) {
+      console.warn('[plate-scanner] ❌ ส่งให้ GAS ล้มเหลว:', e);
+    }
+  } else {
+    console.warn('[plate-scanner] ❌ ไม่มี sessionId หรือ GAS_ALERT_URL');
+  }
+
+  // ลอง postMessage เป็น fallback (เผื่อ opener เข้าถึงได้)
   try {
     if (window.opener && !window.opener.closed) {
       window.opener.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
-      console.log('[plate-scanner] ✅ Sent via window.opener');
-      sentSuccess = true;
     }
-  } catch (e) {
-    console.warn('[plate-scanner] ❌ opener.postMessage failed:', e);
+  } catch (e) {}
+
+  if (!sentToGas) {
+    setStatus('⚠️ อ่านได้ "' + plate + '"<br><small>ส่งกลับ GAS ไม่ได้ — กรุณาตั้งค่า GAS_ALERT_URL หรือ copy ทะเบียนแล้วใส่เอง</small>', 'error');
+    return; // ไม่ปิดหน้าต่าง
   }
 
-  // ลอง 2: ส่งให้ opener.parent (ถ้า opener อยู่ใน iframe)
-  try {
-    if (window.opener && window.opener.parent && window.opener.parent !== window.opener) {
-      window.opener.parent.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
-      console.log('[plate-scanner] ✅ Sent via window.opener.parent');
-      sentSuccess = true;
-    }
-  } catch (e) {
-    console.warn('[plate-scanner] ❌ opener.parent.postMessage failed:', e);
-  }
+  setStatus('✅ อ่านได้: ' + plate + '<br><small>เสร็จแล้ว — ปิดหน้าต่าง</small>', 'success');
 
-  // ลอง 3: ส่งให้ opener.top (ถ้า opener อยู่ใน iframe ลึก)
-  try {
-    if (window.opener && window.opener.top && window.opener.top !== window.opener) {
-      window.opener.top.postMessage({ type: 'PLATE_SCANNED', plate: plate }, '*');
-      console.log('[plate-scanner] ✅ Sent via window.opener.top');
-      sentSuccess = true;
-    }
-  } catch (e) {
-    console.warn('[plate-scanner] ❌ opener.top.postMessage failed:', e);
-  }
-
-  if (!sentSuccess) {
-    console.error('[plate-scanner] ❌ ทุกช่องทางส่ง message ล้มเหลว!');
-    setStatus('⚠️ อ่านได้ "' + plate + '" แต่ส่งกลับ GAS ไม่ได้<br><small>กรุณา copy ทะเบียนแล้วใส่เอง</small>', 'error');
-    // ไม่ปิดหน้าต่างทันที เพื่อให้ user copy ได้
-    return;
-  }
-
-  // หยุดกล้อง + ปิดหน้าต่าง
+  // หยุดกล้อง + ปิดหน้าต่าง (รอนิดให้ GAS poll เจอ)
   setTimeout(() => {
     stopCamera();
     window.close();
-  }, 900);
+  }, 1500);
 }
 
 function cancelScan() {
